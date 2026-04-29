@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LIVE SATELLITE TRACKER</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@200;400;700&display=swap");
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :root {
+        --bg: #020b14;
+        --grid: #0a1f30;
+        --accent: #00e5ff;
+        --accent2: #ff4d6d;
+        --text: #c8e6f5;
+        --dim: #3a6278;
+        --panel-bg: rgba(2, 14, 26, 0.82);
+        --glow: 0 0 18px rgba(0, 229, 255, 0.35);
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Share Tech Mono", monospace;
+        overflow: hidden;
+      }
+
+      /* Subtle scanline overlay */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: repeating-linear-gradient(
+          0deg,
+          transparent,
+          transparent 2px,
+          rgba(0, 0, 0, 0.06) 2px,
+          rgba(0, 0, 0, 0.06) 4px
+        );
+        pointer-events: none;
+        z-index: 99;
+      }
+
+      #canvas-container {
+        position: fixed;
+        inset: 0;
+      }
+
+      canvas {
+        display: block;
+      }
+
+      /* ── TOP BAR ── */
+      #topbar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 52px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 24px;
+        background: var(--panel-bg);
+        border-bottom: 1px solid var(--dim);
+        backdrop-filter: blur(8px);
+        z-index: 10;
+      }
+
+      #topbar .logo {
+        font-family: "Exo 2", sans-serif;
+        font-weight: 700;
+        font-size: 1rem;
+        letter-spacing: 0.18em;
+        color: var(--accent);
+        text-shadow: var(--glow);
+      }
+
+      #topbar .logo span {
+        color: var(--accent2);
+      }
+
+      #clock {
+        font-size: 0.78rem;
+        letter-spacing: 0.12em;
+        color: var(--dim);
+      }
+
+      /* ── STAT PILLS ── */
+      #stats {
+        position: fixed;
+        top: 64px;
+        left: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        z-index: 10;
+      }
+
+      .pill {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: var(--panel-bg);
+        border: 1px solid var(--dim);
+        border-left: 3px solid var(--accent);
+        padding: 8px 14px;
+        border-radius: 4px;
+        backdrop-filter: blur(6px);
+        font-size: 0.72rem;
+        letter-spacing: 0.08em;
+        min-width: 190px;
+      }
+
+      .pill .label {
+        color: var(--dim);
+      }
+      .pill .value {
+        color: var(--accent);
+        font-size: 0.88rem;
+        margin-left: auto;
+      }
+      .pill.warn .value {
+        color: var(--accent2);
+      }
+
+      /* ── STATUS DOT ── */
+      #status-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--accent2);
+        box-shadow: 0 0 8px var(--accent2);
+        transition: background 0.3s, box-shadow 0.3s;
+        flex-shrink: 0;
+      }
+
+      #status-dot.connected {
+        background: var(--accent);
+        box-shadow: 0 0 10px var(--accent);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      /* ── TOOLTIP ── */
+      #tooltip {
+        position: fixed;
+        background: var(--panel-bg);
+        border: 1px solid var(--accent);
+        border-radius: 4px;
+        padding: 8px 14px;
+        font-size: 0.72rem;
+        line-height: 1.6;
+        color: var(--text);
+        pointer-events: none;
+        display: none;
+        z-index: 20;
+        backdrop-filter: blur(8px);
+        max-width: 240px;
+      }
+
+      #tooltip .t-name {
+        font-family: "Exo 2", sans-serif;
+        font-weight: 700;
+        color: var(--accent);
+        letter-spacing: 0.06em;
+        margin-bottom: 4px;
+        font-size: 0.8rem;
+      }
+
+      /* ── LEGEND ── */
+      #legend {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: var(--panel-bg);
+        border: 1px solid var(--dim);
+        border-radius: 4px;
+        padding: 12px 16px;
+        font-size: 0.68rem;
+        line-height: 2;
+        color: var(--dim);
+        backdrop-filter: blur(6px);
+        z-index: 10;
+      }
+
+      #legend .item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .dot-low {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #00e5ff;
+        display: inline-block;
+      }
+      .dot-mid {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ffe066;
+        display: inline-block;
+      }
+      .dot-high {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #ff4d6d;
+        display: inline-block;
+      }
+
+      /* ── CORNER DECORATIONS ── */
+      .corner {
+        position: fixed;
+        width: 20px;
+        height: 20px;
+        border-color: var(--accent);
+        border-style: solid;
+        opacity: 0.5;
+        z-index: 10;
+      }
+      .corner.tl {
+        top: 56px;
+        left: 0;
+        border-width: 2px 0 0 2px;
+      }
+      .corner.tr {
+        top: 56px;
+        right: 0;
+        border-width: 2px 2px 0 0;
+      }
+      .corner.bl {
+        bottom: 0;
+        left: 0;
+        border-width: 0 0 2px 2px;
+      }
+      .corner.br {
+        bottom: 0;
+        right: 0;
+        border-width: 0 2px 2px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="canvas-container"></div>
+
+    <!-- Top bar -->
+    <div id="topbar">
+      <div class="logo">SAT<span>TRACK</span> // LIVE ORBITAL DISPLAY</div>
+      <div id="clock">--:--:-- UTC</div>
+    </div>
+
+    <!-- Stats -->
+    <div id="stats">
+      <div class="pill">
+        <div id="status-dot"></div>
+        <span class="label">FEED</span>
+        <span class="value" id="stat-status">CONNECTING…</span>
+      </div>
+      <div class="pill">
+        <span class="label">OBJECTS TRACKED</span>
+        <span class="value" id="stat-count">0</span>
+      </div>
+      <div class="pill">
+        <span class="label">UPDATE RATE</span>
+        <span class="value" id="stat-rate">— Hz</span>
+      </div>
+      <div class="pill warn">
+        <span class="label">LAST UPDATE</span>
+        <span class="value" id="stat-ts">—</span>
+      </div>
+    </div>
+
+    <!-- Tooltip -->
+    <div id="tooltip">
+      <div class="t-name" id="tt-name"></div>
+      <div id="tt-lat"></div>
+      <div id="tt-lon"></div>
+      <div id="tt-alt"></div>
+    </div>
+
+    <!-- Legend -->
+    <div id="legend">
+      <div class="item"><span class="dot-low"></span> LEO &lt; 2 000 km</div>
+      <div class="item">
+        <span class="dot-mid"></span> MEO 2 000 – 35 000 km
+      </div>
+      <div class="item"><span class="dot-high"></span> GEO &gt; 35 000 km</div>
+    </div>
+
+    <!-- Corner decorations -->
+    <div class="corner tl"></div>
+    <div class="corner tr"></div>
+    <div class="corner bl"></div>
+    <div class="corner br"></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <script type="module">
+      import * as THREE from "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js";
+      import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/controls/OrbitControls.js";
+
+      // ── Constants ──────────────────────────────────────────────────────────────
+      const EARTH_RADIUS = 1.0; // scene units
+      const EARTH_KM = 6371; // km – used to scale altitude
+      const WS_URL = "ws://localhost:8000/ws/satellites";
+      const MAX_SATS = 8000; // pre-allocate for the largest TLE sets
+
+      // ── Scene setup ────────────────────────────────────────────────────────────
+      const container = document.getElementById("canvas-container");
+      const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+      });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setClearColor(0x020b14);
+      container.appendChild(renderer.domElement);
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        0.01,
+        500
+      );
+      camera.position.set(0, 1.8, 3.5);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+      controls.minDistance = 1.3;
+      controls.maxDistance = 20;
+      controls.rotateSpeed = 0.4;
+
+      // ── Stars (background) ─────────────────────────────────────────────────────
+      {
+        const starGeo = new THREE.BufferGeometry();
+        const starPos = new Float32Array(6000);
+        for (let i = 0; i < starPos.length; i++) {
+          const theta = Math.random() * Math.PI * 2;
+          const phi = Math.acos(2 * Math.random() - 1);
+          const r = 80 + Math.random() * 120;
+          starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+          starPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+          starPos[i * 3 + 2] = r * Math.cos(phi);
+        }
+        starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+        const starMat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: 0.18,
+          sizeAttenuation: true,
+          transparent: true,
+          opacity: 0.6,
+        });
+        scene.add(new THREE.Points(starGeo, starMat));
+      }
+
+      // ── Earth ─────────────────────────────────────────────────────────────────
+      // Solid dark sphere
+      const earthGeo = new THREE.SphereGeometry(EARTH_RADIUS, 64, 64);
+      const earthMat = new THREE.MeshPhongMaterial({
+        color: 0x0a2a3a,
+        emissive: 0x051520,
+        specular: 0x112233,
+        shininess: 8,
+      });
+      const earth = new THREE.Mesh(earthGeo, earthMat);
+      scene.add(earth);
+
+      // Graticule overlay (lat/lon grid)
+      const wireGeo = new THREE.SphereGeometry(EARTH_RADIUS + 0.002, 36, 18);
+      const wireMat = new THREE.MeshBasicMaterial({
+        color: 0x0d3d55,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.25,
+      });
+      scene.add(new THREE.Mesh(wireGeo, wireMat));
+
+      // Atmosphere glow ring
+      const atmGeo = new THREE.SphereGeometry(EARTH_RADIUS * 1.025, 64, 64);
+      const atmMat = new THREE.MeshPhongMaterial({
+        color: 0x00aaff,
+        transparent: true,
+        opacity: 0.06,
+        side: THREE.BackSide,
+      });
+      scene.add(new THREE.Mesh(atmGeo, atmMat));
+
+      // ── Lighting ──────────────────────────────────────────────────────────────
+      const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
+      sun.position.set(5, 3, 5);
+      scene.add(sun);
+      scene.add(new THREE.AmbientLight(0x102030, 0.8));
+
+      // ── Satellite points (pre-allocated) ─────────────────────────────────────
+      const satPositions = new Float32Array(MAX_SATS * 3); // x y z per sat
+      const satColors = new Float32Array(MAX_SATS * 3); // r g b per sat
+
+      const satGeo = new THREE.BufferGeometry();
+      satGeo.setAttribute(
+        "position",
+        new THREE.BufferAttribute(satPositions, 3)
+      );
+      satGeo.setAttribute("color", new THREE.BufferAttribute(satColors, 3));
+      satGeo.setDrawRange(0, 0); // draw nothing until first update
+
+      const satMat = new THREE.PointsMaterial({
+        size: 0.018,
+        sizeAttenuation: true,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+      });
+
+      const satPoints = new THREE.Points(satGeo, satMat);
+      scene.add(satPoints);
+
+      // ── Coordinate conversion ─────────────────────────────────────────────────
+      /**
+       * Convert geodetic coordinates to Three.js Cartesian.
+       * Three.js Y is "up" (north pole), matching geographic convention.
+       */
+      function llaToXYZ(lat, lon, altKm) {
+        const r = EARTH_RADIUS + (altKm / EARTH_KM) * EARTH_RADIUS;
+        const phi = (90 - lat) * (Math.PI / 180); // polar angle from north
+        const tht = (lon + 180) * (Math.PI / 180); // azimuth
+
+        return {
+          x: r * Math.sin(phi) * Math.cos(tht),
+          y: r * Math.cos(phi),
+          z: -r * Math.sin(phi) * Math.sin(tht),
+        };
+      }
+
+      // Colour by altitude band
+      function altToColor(altKm, out, offset) {
+        if (altKm < 2000) {
+          out[offset] = 0.0; // LEO – cyan
+          out[offset + 1] = 0.9;
+          out[offset + 2] = 1.0;
+        } else if (altKm < 35000) {
+          out[offset] = 1.0; // MEO – yellow
+          out[offset + 1] = 0.88;
+          out[offset + 2] = 0.2;
+        } else {
+          out[offset] = 1.0; // GEO – red
+          out[offset + 1] = 0.3;
+          out[offset + 2] = 0.2;
+        }
+      }
+
+      // ── Satellite name store (for hover) ──────────────────────────────────────
+      let satNames = [];
+      let satLatLon = []; // [{lat,lon,alt}]
+
+      // ── WebSocket ─────────────────────────────────────────────────────────────
+      const statusDot = document.getElementById("status-dot");
+      const statStatus = document.getElementById("stat-status");
+      const statCount = document.getElementById("stat-count");
+      const statRate = document.getElementById("stat-rate");
+      const statTs = document.getElementById("stat-ts");
+
+      let lastMsgTime = 0;
+      let msgCount = 0;
+
+      function connectWS() {
+        const ws = new WebSocket(WS_URL);
+
+        ws.onopen = () => {
+          statusDot.classList.add("connected");
+          statStatus.textContent = "LIVE";
+        };
+
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          const n = Math.min(data.length, MAX_SATS);
+
+          satNames = [];
+          satLatLon = [];
+
+          for (let i = 0; i < n; i++) {
+            const { name, lat, lon, alt } = data[i];
+            const { x, y, z } = llaToXYZ(lat, lon, alt);
+            const base = i * 3;
+
+            satPositions[base] = x;
+            satPositions[base + 1] = y;
+            satPositions[base + 2] = z;
+
+            altToColor(alt, satColors, base);
+
+            satNames.push(name);
+            satLatLon.push({ lat, lon, alt });
+          }
+
+          satGeo.attributes.position.needsUpdate = true;
+          satGeo.attributes.color.needsUpdate = true;
+          satGeo.setDrawRange(0, n);
+
+          // Stats
+          statCount.textContent = n.toLocaleString();
+          const now = performance.now();
+          if (lastMsgTime) {
+            const hz = (1000 / (now - lastMsgTime)).toFixed(1);
+            statRate.textContent = `${hz} Hz`;
+          }
+          lastMsgTime = now;
+          statTs.textContent = new Date().toISOString().substr(11, 8) + " UTC";
+        };
+
+        ws.onerror = () => {
+          statusDot.classList.remove("connected");
+          statStatus.textContent = "ERROR";
+        };
+
+        ws.onclose = () => {
+          statusDot.classList.remove("connected");
+          statStatus.textContent = "RECONNECTING…";
+          setTimeout(connectWS, 3000);
+        };
+      }
+
+      connectWS();
+
+      // ── Hover / Raycasting ────────────────────────────────────────────────────
+      const raycaster = new THREE.Raycaster();
+      raycaster.params.Points.threshold = 0.02;
+      const mouse = new THREE.Vector2(-99, -99);
+      const tooltip = document.getElementById("tooltip");
+
+      window.addEventListener("mousemove", (e) => {
+        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObject(satPoints);
+
+        if (intersects.length > 0) {
+          const idx = intersects[0].index;
+          if (satNames[idx]) {
+            const d = satLatLon[idx];
+            document.getElementById("tt-name").textContent = satNames[idx];
+            document.getElementById(
+              "tt-lat"
+            ).textContent = `LAT  ${d.lat.toFixed(3)}°`;
+            document.getElementById(
+              "tt-lon"
+            ).textContent = `LON  ${d.lon.toFixed(3)}°`;
+            document.getElementById(
+              "tt-alt"
+            ).textContent = `ALT  ${d.alt.toFixed(1)} km`;
+            tooltip.style.display = "block";
+            tooltip.style.left = e.clientX + 14 + "px";
+            tooltip.style.top = e.clientY - 10 + "px";
+          }
+        } else {
+          tooltip.style.display = "none";
+        }
+      });
+
+      // ── Clock ─────────────────────────────────────────────────────────────────
+      const clockEl = document.getElementById("clock");
+      setInterval(() => {
+        clockEl.textContent = new Date().toISOString().substr(11, 8) + " UTC";
+      }, 1000);
+
+      // ── Resize ────────────────────────────────────────────────────────────────
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // ── Render loop ───────────────────────────────────────────────────────────
+      (function animate() {
+        requestAnimationFrame(animate);
+        earth.rotation.y += 0.00015; // slow Earth rotation for aesthetics
+        controls.update();
+        renderer.render(scene, camera);
+      })();
+    </script>
+  </body>
+</html>
