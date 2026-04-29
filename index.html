@@ -488,6 +488,7 @@
   <div class="corner bl"></div>
   <div class="corner br"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/satellite.js@5.0.0/dist/satellite.min.js"></script>
   <script type="importmap">
     {
       "imports": {
@@ -502,17 +503,16 @@
     // ── Constants ──────────────────────────────────────────────────────────
     const EARTH_RADIUS = 1.0;
     const EARTH_KM = 6371;
-    const EARTH_SIDEREAL_DAY_S = 86164.1; // seconds per sidereal day
-    const MAX_SATS = 15000;
+    const MAX_SATS = 20000;
+    const CACHE_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — respect CelesTrak rate limit
 
-    // WS URL
-    let WS_URL;
-    if (window.location.protocol === "file:") {
-      WS_URL = "ws://localhost:8000/ws/satellites";
-    } else {
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      WS_URL = `${proto}//${window.location.host}/ws/satellites`;
-    }
+    // TLE sources to load (via a CORS proxy since CelesTrak blocks direct browser fetches)
+    const CORS = "https://corsproxy.io/?";
+    const TLE_GROUPS = [
+      "active",
+      "stations",
+      "cosmos-1408-debris",
+    ];
 
     // ── Scene ──────────────────────────────────────────────────────────────
     const container = document.getElementById("canvas-container");
@@ -546,7 +546,9 @@
         pos[i * 3 + 2] = r * Math.cos(phi);
       }
       geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-      scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.18, sizeAttenuation: true, transparent: true, opacity: 0.6 })));
+      scene.add(new THREE.Points(geo, new THREE.PointsMaterial({
+        color: 0xffffff, size: 0.18, sizeAttenuation: true, transparent: true, opacity: 0.6
+      })));
     }
 
     // ── Earth ──────────────────────────────────────────────────────────────
@@ -562,23 +564,22 @@
     );
     scene.add(earth);
 
-    // Graticule overlay
     scene.add(new THREE.Mesh(
       new THREE.SphereGeometry(EARTH_RADIUS + 0.002, 36, 18),
       new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true, opacity: 0.08 })
     ));
-
-    // Atmosphere glow
     scene.add(new THREE.Mesh(
       new THREE.SphereGeometry(EARTH_RADIUS * 1.025, 64, 64),
       new THREE.MeshPhongMaterial({ color: 0x00aaff, transparent: true, opacity: 0.06, side: THREE.BackSide })
     ));
 
-    // Lighting
-    const sun = new THREE.DirectionalLight(0xffffff, 1.0);
-    sun.position.set(5, 3, 5);
-    scene.add(sun);
-    scene.add(new THREE.DirectionalLight(0xffffff, 0.5).position.set(-5, -3, -5) && sun);
+    // Lighting — two opposing lights so the full globe is visible
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    sunLight.position.set(5, 3, 5);
+    scene.add(sunLight);
+    const backLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    backLight.position.set(-5, -3, -5);
+    scene.add(backLight);
     scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
     // ── Satellite points ───────────────────────────────────────────────────
@@ -588,52 +589,36 @@
     satGeo.setAttribute("position", new THREE.BufferAttribute(satPositions, 3));
     satGeo.setAttribute("color", new THREE.BufferAttribute(satColors, 3));
     satGeo.setDrawRange(0, 0);
-    const satMat = new THREE.PointsMaterial({ size: 0.018, sizeAttenuation: true, vertexColors: true, transparent: true, opacity: 0.92, depthWrite: false });
+    const satMat = new THREE.PointsMaterial({
+      size: 0.018, sizeAttenuation: true, vertexColors: true,
+      transparent: true, opacity: 0.92, depthWrite: false
+    });
     const satPoints = new THREE.Points(satGeo, satMat);
     scene.add(satPoints);
 
-    // Selected highlight (single bright point)
+    // Selected highlight
     const hlGeo = new THREE.BufferGeometry();
     const hlPos = new Float32Array(3);
     hlGeo.setAttribute("position", new THREE.BufferAttribute(hlPos, 3));
     hlGeo.setDrawRange(0, 0);
-    const hlMat = new THREE.PointsMaterial({ size: 0.045, color: 0xff4d6d, transparent: true, opacity: 1, depthWrite: false });
-    const hlPoint = new THREE.Points(hlGeo, hlMat);
+    const hlPoint = new THREE.Points(hlGeo,
+      new THREE.PointsMaterial({ size: 0.045, color: 0xff4d6d, transparent: true, opacity: 1, depthWrite: false })
+    );
     scene.add(hlPoint);
 
-    // ── Real-time Earth rotation ───────────────────────────────────────────
-    /**
-     * Greenwich Mean Sidereal Time (GMST) in radians.
-     * Formula from "Astronomical Algorithms" (Meeus), accurate to ~0.1 s.
-     */
-    function gmstRadians(dateUTC) {
-      const J2000 = 2451545.0;
-      const msPerDay = 86400000;
-      // Julian date
-      const JD = dateUTC.getTime() / msPerDay + 2440587.5;
-      const T = (JD - J2000) / 36525; // Julian centuries from J2000
-      // GMST in degrees
-      let gmstDeg = 280.46061837
-        + 360.98564736629 * (JD - J2000)
-        + 0.000387933 * T * T
-        - (T * T * T) / 38710000;
-      gmstDeg = ((gmstDeg % 360) + 360) % 360;
-      return gmstDeg * (Math.PI / 180);
+    // ── GMST / Earth rotation ──────────────────────────────────────────────
+    function gmstRadians(date) {
+      const JD = date.getTime() / 86400000 + 2440587.5;
+      const T = (JD - 2451545.0) / 36525;
+      let deg = 280.46061837 + 360.98564736629 * (JD - 2451545.0)
+        + 0.000387933 * T * T - (T * T * T) / 38710000;
+      return (((deg % 360) + 360) % 360) * (Math.PI / 180);
     }
-
-    /**
-     * Set Earth's Y-rotation to match current GMST.
-     * Three.js texture has 0° lon at x-axis; we compensate for the
-     * texture's own offset (≈ 180° / π offset due to how (lon+180) is applied
-     * in llaToXYZ) so both the texture and satellite dots align.
-     */
     function syncEarthRotation() {
-      const gmst = gmstRadians(new Date());
-      // The satellite coordinate system uses lon+180 offset so we subtract π
-      earth.rotation.y = gmst - Math.PI;
+      earth.rotation.y = gmstRadians(new Date()) - Math.PI;
     }
 
-    // ── Coordinate conversion ──────────────────────────────────────────────
+    // ── Coordinate helpers ─────────────────────────────────────────────────
     function llaToXYZ(lat, lon, altKm) {
       const r = EARTH_RADIUS + (altKm / EARTH_KM) * EARTH_RADIUS;
       const phi = (90 - lat) * (Math.PI / 180);
@@ -644,64 +629,171 @@
         z: -r * Math.sin(phi) * Math.sin(tht),
       };
     }
-
-    function altToColor(altKm, out, off) {
-      if (altKm < 2000) { out[off] = 0.0; out[off + 1] = 0.9; out[off + 2] = 1.0; }
-      else if (altKm < 35000) { out[off] = 1.0; out[off + 1] = 0.88; out[off + 2] = 0.2; }
+    function altToColor(alt, out, off) {
+      if (alt < 2000) { out[off] = 0.0; out[off + 1] = 0.9; out[off + 2] = 1.0; }
+      else if (alt < 35000) { out[off] = 1.0; out[off + 1] = 0.88; out[off + 2] = 0.2; }
       else { out[off] = 1.0; out[off + 1] = 0.3; out[off + 2] = 0.2; }
     }
-
-    function orbitClass(altKm) {
-      if (altKm < 2000) return "LEO";
-      if (altKm < 35000) return "MEO";
+    function orbitClass(alt) {
+      if (alt < 2000) return "LEO";
+      if (alt < 35000) return "MEO";
       return "GEO";
     }
 
-    // ── Satellite data store ───────────────────────────────────────────────
+    // ── TLE storage ───────────────────────────────────────────────────────
+    let satrecs = [];  // satellite.js satrec objects
     let satNames = [];
-    let satLatLon = [];   // [{lat,lon,alt}]
-    let satTLE = [];   // [{norad, inc, ecc, period, epoch}] – from server if provided
+    let satLatLon = [];
+    let satMeta = []; // {norad, inc, ecc, period, epoch}
 
-    // ── WebSocket ─────────────────────────────────────────────────────────
+    // ── Parse TLE text into satrecs ───────────────────────────────────────
+    function parseTLE(text) {
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      const out = [];
+      for (let i = 0; i < lines.length - 2; i++) {
+        if (lines[i + 1].startsWith("1 ") && lines[i + 2].startsWith("2 ")) {
+          const name = lines[i];
+          const l1 = lines[i + 1];
+          const l2 = lines[i + 2];
+          try {
+            const rec = satellite.twoline2satrec(l1, l2);
+            // Orbital params from TLE line 2
+            const incDeg = parseFloat(l2.substring(8, 16));
+            const ecc = parseFloat("0." + l2.substring(26, 33));
+            const mm = parseFloat(l2.substring(52, 63)); // rev/day
+            const periodS = mm > 0 ? (24 * 3600 / mm) : null;
+            // Epoch from TLE line 1: YYDDD.fraction
+            const epochRaw = l1.substring(18, 32).trim();
+            const yr2 = parseInt(epochRaw.substring(0, 2));
+            const yr = yr2 < 57 ? 2000 + yr2 : 1900 + yr2;
+            const doy = parseFloat(epochRaw.substring(2));
+            const epochDate = new Date(Date.UTC(yr, 0, 1));
+            epochDate.setUTCDate(epochDate.getUTCDate() + Math.floor(doy) - 1);
+            const epochStr = epochDate.toISOString().substring(0, 10);
+
+            out.push({
+              name, rec,
+              norad: String(rec.satnum),
+              inc: incDeg,
+              ecc,
+              period: periodS,
+              epoch: epochStr,
+            });
+          } catch { /* skip bad TLEs */ }
+          i += 2;
+        }
+      }
+      return out;
+    }
+
+    // ── Fetch TLE with localStorage cache ─────────────────────────────────
+    async function fetchGroup(group) {
+      const key = `tle_${group}`;
+      const keyTime = `tle_${group}_ts`;
+      const cached = localStorage.getItem(key);
+      const ts = parseInt(localStorage.getItem(keyTime) || "0");
+
+      if (cached && Date.now() - ts < CACHE_TTL_MS) {
+        return cached;
+      }
+
+      const url = `${CORS}${encodeURIComponent(
+        `https://celestrak.org/NORAD/elements/gp.php?GROUP=${group}&FORMAT=tle`
+      )}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      if (text.length < 200) throw new Error("Response too short — likely rate limited");
+      localStorage.setItem(key, text);
+      localStorage.setItem(keyTime, String(Date.now()));
+      return text;
+    }
+
+    // ── Load all TLE groups ────────────────────────────────────────────────
     const statusDot = document.getElementById("status-dot");
     const statStatus = document.getElementById("stat-status");
     const statCount = document.getElementById("stat-count");
     const statRate = document.getElementById("stat-rate");
     const statTs = document.getElementById("stat-ts");
-    let lastMsgTime = 0;
 
-    function connectWS() {
-      const ws = new WebSocket(WS_URL);
-      ws.onopen = () => { statusDot.classList.add("connected"); statStatus.textContent = "LIVE"; };
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        const n = Math.min(data.length, MAX_SATS);
-        satNames = []; satLatLon = []; satTLE = [];
-        for (let i = 0; i < n; i++) {
-          const { name, lat, lon, alt, norad, inc, ecc, period, epoch } = data[i];
-          const { x, y, z } = llaToXYZ(lat, lon, alt);
-          const base = i * 3;
-          satPositions[base] = x; satPositions[base + 1] = y; satPositions[base + 2] = z;
-          altToColor(alt, satColors, base);
-          satNames.push(name);
-          satLatLon.push({ lat, lon, alt });
-          satTLE.push({ norad: norad || "—", inc: inc || null, ecc: ecc || null, period: period || null, epoch: epoch || null });
+    statStatus.textContent = "LOADING…";
+
+    async function loadAllTLEs() {
+      const seen = new Set();
+      const all = [];
+
+      for (const group of TLE_GROUPS) {
+        try {
+          statStatus.textContent = `FETCHING ${group.toUpperCase()}…`;
+          const text = await fetchGroup(group);
+          const parsed = parseTLE(text);
+          for (const s of parsed) {
+            if (!seen.has(s.norad)) { seen.add(s.norad); all.push(s); }
+          }
+          console.log(`${group}: ${parsed.length} objects`);
+        } catch (e) {
+          console.warn(`Failed to load ${group}:`, e.message);
         }
-        satGeo.attributes.position.needsUpdate = true;
-        satGeo.attributes.color.needsUpdate = true;
-        satGeo.setDrawRange(0, n);
-        statCount.textContent = n.toLocaleString();
-        const now = performance.now();
-        if (lastMsgTime) statRate.textContent = (1000 / (now - lastMsgTime)).toFixed(1) + " Hz";
-        lastMsgTime = now;
-        statTs.textContent = new Date().toISOString().substr(11, 8) + " UTC";
-        // Update selected panel live data
-        if (selectedSatIndex !== -1) updateLivePanelData(selectedSatIndex);
-      };
-      ws.onerror = () => { statusDot.classList.remove("connected"); statStatus.textContent = "ERROR"; };
-      ws.onclose = () => { statusDot.classList.remove("connected"); statStatus.textContent = "RECONNECTING…"; setTimeout(connectWS, 3000); };
+      }
+
+      satrecs = all.map(s => s.rec);
+      satNames = all.map(s => s.name);
+      satMeta = all.map(s => ({ norad: s.norad, inc: s.inc, ecc: s.ecc, period: s.period, epoch: s.epoch }));
+      satLatLon = new Array(all.length).fill(null);
+
+      statusDot.classList.add("connected");
+      statStatus.textContent = "LIVE";
+      statCount.textContent = all.length.toLocaleString();
+      console.log(`Total: ${all.length} unique objects`);
+
+      propagateAll(); // first pass immediately
     }
-    connectWS();
+
+    // ── Propagate all positions ────────────────────────────────────────────
+    let lastPropTime = 0;
+
+    function propagateAll() {
+      const now = new Date();
+      const n = Math.min(satrecs.length, MAX_SATS);
+      let drawn = 0;
+
+      for (let i = 0; i < n; i++) {
+        try {
+          const pv = satellite.propagate(satrecs[i], now);
+          if (!pv.position || isNaN(pv.position.x)) continue;
+          const gmst = satellite.gstime(now);
+          const geo = satellite.eciToGeodetic(pv.position, gmst);
+          const lat = satellite.degreesLat(geo.latitude);
+          const lon = satellite.degreesLong(geo.longitude);
+          const alt = geo.height; // km
+
+          if (isNaN(lat) || isNaN(lon) || isNaN(alt) || alt < -100) continue;
+
+          satLatLon[i] = { lat, lon, alt };
+          const { x, y, z } = llaToXYZ(lat, lon, alt);
+          const base = drawn * 3;
+          satPositions[base] = x;
+          satPositions[base + 1] = y;
+          satPositions[base + 2] = z;
+          altToColor(alt, satColors, base);
+          drawn++;
+        } catch { /* skip */ }
+      }
+
+      satGeo.attributes.position.needsUpdate = true;
+      satGeo.attributes.color.needsUpdate = true;
+      satGeo.setDrawRange(0, drawn);
+
+      const now2 = performance.now();
+      if (lastPropTime) statRate.textContent = (1000 / (now2 - lastPropTime)).toFixed(1) + " Hz";
+      lastPropTime = now2;
+      statTs.textContent = now.toISOString().substr(11, 8) + " UTC";
+
+      if (selectedSatIndex !== -1) updateLivePanelData(selectedSatIndex);
+    }
+
+    // Propagate every second
+    loadAllTLEs().then(() => setInterval(propagateAll, 1000));
 
     // ── Panel helpers ──────────────────────────────────────────────────────
     let selectedSatIndex = -1;
@@ -726,13 +818,12 @@
     window.toggleChase = toggleChase;
 
     function updateLivePanelData(idx) {
-      if (!satLatLon[idx]) return;
       const d = satLatLon[idx];
+      if (!d) return;
       document.getElementById("pd-lat").textContent = d.lat.toFixed(4) + "°";
       document.getElementById("pd-lon").textContent = d.lon.toFixed(4) + "°";
       document.getElementById("pd-alt").textContent = d.alt.toFixed(1) + " km";
       document.getElementById("pd-class").textContent = orbitClass(d.alt);
-      // Update highlight
       const base = idx * 3;
       hlPos[0] = satPositions[base]; hlPos[1] = satPositions[base + 1]; hlPos[2] = satPositions[base + 2];
       hlGeo.attributes.position.needsUpdate = true;
@@ -742,56 +833,44 @@
     function openPanel(idx) {
       selectedSatIndex = idx;
       const name = satNames[idx];
-      const tle = satTLE[idx] || {};
+      const meta = satMeta[idx] || {};
       document.getElementById("detail-panel").style.display = "block";
       document.getElementById("panel-sat-name").textContent = name;
       updateLivePanelData(idx);
-
-      // TLE orbital params
-      document.getElementById("pd-norad").textContent = tle.norad || "—";
-      document.getElementById("pd-inc").textContent = tle.inc != null ? tle.inc.toFixed(4) + "°" : "—";
-      document.getElementById("pd-ecc").textContent = tle.ecc != null ? tle.ecc.toFixed(7) : "—";
-      document.getElementById("pd-period").textContent = tle.period != null ? (tle.period / 60).toFixed(2) + " min" : "—";
-      document.getElementById("pd-epoch").textContent = tle.epoch || "—";
-
-      // Fetch description
-      fetchSatDescription(name);
+      document.getElementById("pd-norad").textContent = meta.norad || "—";
+      document.getElementById("pd-inc").textContent = meta.inc != null ? meta.inc.toFixed(4) + "°" : "—";
+      document.getElementById("pd-ecc").textContent = meta.ecc != null ? meta.ecc.toFixed(7) : "—";
+      document.getElementById("pd-period").textContent = meta.period != null ? (meta.period / 60).toFixed(2) + " min" : "—";
+      document.getElementById("pd-epoch").textContent = meta.epoch || "—";
+      fetchSatDescription(name, idx);
     }
 
-    async function fetchSatDescription(name) {
+    async function fetchSatDescription(name, idx) {
       const loadEl = document.getElementById("panel-loading");
       const descEl = document.getElementById("panel-desc");
       const titleEl = document.getElementById("desc-section-title");
       loadEl.style.display = "block";
-      descEl.style.display = "none";
-      titleEl.style.display = "none";
+      descEl.style.display = titleEl.style.display = "none";
 
-      // Strip trailing suffix like " (STARLINK-1234)" or version numbers
       const query = name.replace(/\s*[\(\[].+[\)\]]/, "").trim();
       try {
-        const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`;
-        const res = await fetch(url);
+        const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`);
         if (res.ok) {
           const j = await res.json();
           if (j.extract && j.extract.length > 20) {
-            const snippet = j.extract.split(".").slice(0, 3).join(".") + ".";
-            descEl.textContent = snippet;
-            titleEl.style.display = "block";
-            descEl.style.display = "block";
+            descEl.textContent = j.extract.split(".").slice(0, 3).join(".") + ".";
+            titleEl.style.display = descEl.style.display = "block";
             loadEl.style.display = "none";
             return;
           }
         }
       } catch { }
 
-      // Fallback: generate a description from what we know
-      const d = satLatLon[selectedSatIndex] || {};
+      const d = satLatLon[idx] || {};
       const cls = orbitClass(d.alt || 0);
-      const grouped = name.match(/^([A-Z\-]+)\s/);
-      const family = grouped ? grouped[1] : name.split(" ")[0];
-      descEl.textContent = `${name} is a ${cls} satellite. No public description is available for this object. It may be a classified payload, debris, or part of a constellation family (${family}).`;
-      titleEl.style.display = "block";
-      descEl.style.display = "block";
+      const fam = (name.match(/^([A-Z\-]+)\s/) || [, name.split(" ")[0]])[1];
+      descEl.textContent = `${name} is a ${cls} object. No public Wikipedia article was found. It may be a classified payload, debris fragment, or part of the ${fam} family.`;
+      titleEl.style.display = descEl.style.display = "block";
       loadEl.style.display = "none";
     }
 
@@ -808,8 +887,8 @@
       const hits = raycaster.intersectObject(satPoints);
       if (hits.length > 0) {
         const idx = hits[0].index;
-        if (satNames[idx]) {
-          const d = satLatLon[idx];
+        const d = satLatLon[idx];
+        if (d && satNames[idx]) {
           document.getElementById("tt-name").textContent = satNames[idx];
           document.getElementById("tt-lat").textContent = `LAT  ${d.lat.toFixed(3)}°`;
           document.getElementById("tt-lon").textContent = `LON  ${d.lon.toFixed(3)}°`;
@@ -832,7 +911,7 @@
       }
     });
 
-    // ── Clock ─────────────────────────────────────────────────────────────
+    // ── Clock ──────────────────────────────────────────────────────────────
     const clockEl = document.getElementById("clock");
     setInterval(() => {
       clockEl.textContent = new Date().toISOString().substr(11, 8) + " UTC";
@@ -850,20 +929,14 @@
     const targetPos = new THREE.Vector3();
     (function animate() {
       requestAnimationFrame(animate);
-
-      // Real-time Earth rotation
       syncEarthRotation();
-
-      // Chase cam
       if (chaseCamActive && selectedSatIndex !== -1) {
         const b = selectedSatIndex * 3;
         targetPos.set(satPositions[b], satPositions[b + 1], satPositions[b + 2]);
-        const offset = targetPos.clone().normalize().multiplyScalar(0.22);
-        const idealPos = targetPos.clone().add(offset);
+        const idealPos = targetPos.clone().add(targetPos.clone().normalize().multiplyScalar(0.22));
         camera.position.lerp(idealPos, 0.05);
         controls.target.lerp(targetPos, 0.05);
       }
-
       controls.update();
       renderer.render(scene, camera);
     })();
